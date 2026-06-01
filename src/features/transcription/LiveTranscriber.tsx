@@ -20,13 +20,7 @@ import { useSession } from '../../store.ts'
 import { formatDuration } from '../../lib/time.ts'
 import { useSpeechRecognition } from './useSpeechRecognition.ts'
 import { useWakeLock } from './useWakeLock.ts'
-
-/** Supported transcription languages. Web Speech accepts BCP-47 tags. */
-const LANGUAGES: ReadonlyArray<{ value: string; label: string }> = [
-  { value: 'en-IN', label: 'English (India)' },
-  { value: 'en-US', label: 'English (US)' },
-  { value: 'en-GB', label: 'English (UK)' },
-]
+import { LANGUAGE_GROUPS } from './languages.ts'
 
 /** Map connection status to a pill tone + human label for the status indicator. */
 function connectionPresentation(
@@ -84,6 +78,7 @@ export function LiveTranscriber(): ReactElement {
 
   const [manualText, setManualText] = useState('')
   const langSelectId = useId()
+  const langHintId = useId()
   const manualInputId = useId()
 
   // Wire the screen wake lock to the actual recording lifecycle (covers reload-resume too).
@@ -224,7 +219,17 @@ export function LiveTranscriber(): ReactElement {
         </span>
       )}
 
-      {/* Language selector — restarts the engine on change while recording. */}
+      {/*
+        Language selector — always rendered (switchable while recording); changing it bounces
+        the engine live via the store's lang subscription. Grouped with <optgroup> so the long
+        Indian-language list stays scannable, and described by an accessible Hinglish hint.
+
+        Web Speech runs one language model at a time and cannot code-switch mid-session, so the
+        right play for Hinglish is a good default (English (India), which handles Indian-accented
+        English plus embedded Hindi words best) with a one-tap switch to Hindi for Hindi-heavy
+        stretches. The ⓘ surfaces that guidance for sighted users; aria-describedby delivers the
+        same hint to screen readers when the select is focused.
+      */}
       <div className="flex items-center gap-1.5">
         <label
           htmlFor={langSelectId}
@@ -238,14 +243,38 @@ export function LiveTranscriber(): ReactElement {
           id={langSelectId}
           value={lang}
           onChange={(e) => setMeta({ lang: e.target.value })}
+          aria-describedby={langHintId}
           className="h-8 rounded-[var(--radius-nw)] border border-[color:var(--color-hairline)] bg-[color:var(--nw-surface)] px-2 text-[13px] text-ink-soft focus:border-[color:var(--nw-accent)] focus:outline-none"
         >
-          {LANGUAGES.map((l) => (
-            <option key={l.value} value={l.value}>
-              {l.label}
-            </option>
+          {LANGUAGE_GROUPS.map((group) => (
+            <optgroup key={group.label} label={group.label}>
+              {group.options.map((l) => (
+                <option key={l.value} value={l.value}>
+                  {l.label}
+                </option>
+              ))}
+            </optgroup>
           ))}
         </select>
+        {/*
+          Info affordance for the Hinglish guidance. The visible ⓘ carries a mouse-hover title;
+          the hint text itself lives in a visually-hidden element referenced by the select's
+          aria-describedby so screen-reader users hear it on focus without it being announced
+          twice. Both convey the same recommendation.
+        */}
+        <span
+          className="cursor-help text-xs text-muted"
+          tabIndex={0}
+          role="img"
+          aria-label="Language tip"
+          title="Speaking Hinglish? English (India) handles mixed Hindi-English best. Switch to Hindi for Hindi-heavy stretches."
+        >
+          <span aria-hidden="true">ⓘ</span>
+        </span>
+        <span id={langHintId} className="sr-only">
+          Speaking Hinglish? English (India) handles mixed Hindi-English best. Switch to Hindi
+          for Hindi-heavy stretches.
+        </span>
       </div>
     </div>
   )

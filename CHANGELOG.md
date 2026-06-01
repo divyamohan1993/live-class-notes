@@ -2,6 +2,21 @@
 
 All notable changes to NoteWeave are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.0] - 2026-06-01
+
+### Added
+- **Multilingual transcription**: Indian English default, plus Hindi and nine more Indian languages (Bengali, Tamil, Telugu, Marathi, Gujarati, Kannada, Malayalam, Punjabi, Urdu) and US/UK English, in a grouped selector with an accessible Hinglish guidance hint. Switchable live, mid-recording.
+- **Permanent multi-session archive**: completed sessions are saved to IndexedDB; starting a New session or opening an archived one always archives the current session first (nothing is ever overwritten). A "Sessions" panel browses, opens, and deletes past sessions.
+- **5-minute idle auto-complete**: a session with no speech for 5 minutes finalizes automatically.
+- **In-document recovery status**: calm "Reconnecting, your notes are saved", "Reconnected", "Session complete. Saved.", and microphone-blocked messages, shown without re-rendering the transcript.
+
+### Changed
+- **Transcription resilience overhaul** for multi-hour, Indian-accented, Hinglish use: proactive recognizer cycling before the browser's silent cut-off; a start-timeout that force-resets a wedged recognizer (fixes "stuck reconnecting"); a watchdog that heals a fully-down engine; the last interim text is flushed to a saved segment on any drop; "Reconnecting" shows only on a genuine stall, never on healthy cycles; a busy or locked microphone (audio-capture) auto-recovers; slurred or low-confidence speech is captured as the best guess (maxAlternatives).
+- **Durability**: IndexedDB writes serialized and retried; hydrate degrades gracefully on corrupt data; quota errors handled.
+- **App shell**: global error and unhandledrejection nets, a beforeunload flush, and a recoverable "Try again" error boundary.
+- HTML export renders math as native MathML (truly self-contained, no fonts needed).
+- Default transcription language set to Indian English (en-IN).
+
 ## [0.1.0] - 2026-06-01
 
 ### Added

@@ -87,3 +87,19 @@ export interface SessionState {
    */
   clockOffsetMs: number
 }
+
+/**
+ * A lightweight, list-ready descriptor of one permanently archived session. The session
+ * picker renders these without deserializing the full snapshot (segments + image data).
+ * `createdAtEpoch` is when the snapshot was archived and is the stable sort key (newest
+ * first); `endedAtEpoch` is null for a session that was archived while still open.
+ */
+export interface ArchivedSessionSummary {
+  id: string
+  title: string
+  dateLabel: string
+  segmentCount: number
+  imageCount: number
+  createdAtEpoch: number
+  endedAtEpoch: number | null
+}

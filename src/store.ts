@@ -20,6 +20,7 @@
  */
 import { create } from 'zustand'
 import type {
+  ArchivedSessionSummary,
   ConnectionStatus,
   NoteImage,
   SessionMeta,
@@ -27,7 +28,7 @@ import type {
   TranscriptSegment,
 } from './types.ts'
 import * as db from './lib/db.ts'
-import type { MetaRecord } from './lib/db.ts'
+import type { ArchivedSession, MetaRecord } from './lib/db.ts'
 import { newId } from './lib/id.ts'
 import { formatDateLabel } from './lib/time.ts'
 
@@ -55,6 +56,24 @@ export interface SessionActions {
    * survive a hard close. Safe to call anytime; a no-op when nothing is pending.
    */
   flushMeta: () => Promise<void>
+  /**
+   * Snapshot the current session into the permanent archive and return its archive id.
+   * Returns null when there is nothing worth keeping (no segments and no images). Flushes
+   * any pending meta first so the snapshot is current. Calling it twice on an unchanged
+   * session does not create a duplicate — the existing archive id is returned instead.
+   */
+  archiveCurrentSession: () => Promise<string | null>
+  /** All archived sessions as lightweight summaries, newest first. */
+  listArchivedSessions: () => Promise<ArchivedSessionSummary[]>
+  /**
+   * Restore an archived session into the current workspace. The outgoing current session
+   * is archived first (so it is never lost), then the chosen snapshot becomes the live
+   * session and is persisted as the 'current' record, atomically replacing it. A no-op if
+   * the id is unknown.
+   */
+  loadArchivedSession: (id: string) => Promise<void>
+  /** Permanently remove one archived session. */
+  deleteArchivedSession: (id: string) => Promise<void>
 }
 
 export type SessionStore = SessionState & SessionActions
@@ -94,6 +113,30 @@ const PERSIST_DEBOUNCE_MS = 800
 let metaTimer: ReturnType<typeof setTimeout> | null = null
 let getStoreState: (() => SessionState) | null = null
 
+/**
+ * Monotonic mutation counter + the (counter, id) of the session most recently archived,
+ * used to suppress duplicate archives WITHOUT ever skipping a real change.
+ *
+ * `mutationSeq` is bumped by every mutator that changes persisted content (segments,
+ * images, meta, clock offset). `archiveCurrent` skips writing only when `mutationSeq`
+ * still equals `lastArchivedSeq` — i.e. nothing changed since the last archive. This is
+ * O(1) and cannot have false negatives: a content signature based on counts/title would
+ * miss an in-place segment edit (same length, same ids, same title) and then a following
+ * resetSession/replaceCurrent would destroy that edit. The counter closes that hole.
+ *
+ * `lastArchivedSeq`/`lastArchivedId` are set after a successful archive AND after
+ * restoring a snapshot (a freshly loaded session already exists in the archive, so an
+ * immediate New session must reuse `lastArchivedId` rather than duplicate it).
+ */
+let mutationSeq = 0
+let lastArchivedSeq = -1
+let lastArchivedId: string | null = null
+
+/** Record that persisted content changed, so the next archive is not deduped away. */
+function markDirty(): void {
+  mutationSeq++
+}
+
 function snapshotMeta(state: SessionState): MetaRecord {
   return {
     meta: state.meta,
@@ -102,6 +145,34 @@ function snapshotMeta(state: SessionState): MetaRecord {
     startedAtEpoch: state.startedAtEpoch,
     endedAtEpoch: state.endedAtEpoch,
     status: state.status,
+  }
+}
+
+/** Build a complete, self-contained archive snapshot from the current state. */
+function snapshotSession(state: SessionState, id: string): ArchivedSession {
+  return {
+    id,
+    meta: state.meta,
+    segments: state.segments,
+    images: state.images,
+    clockOffsetMs: state.clockOffsetMs,
+    startedAtEpoch: state.startedAtEpoch,
+    endedAtEpoch: state.endedAtEpoch,
+    status: state.status,
+    createdAtEpoch: Date.now(),
+  }
+}
+
+/** Project a stored snapshot down to the list-ready summary the session picker consumes. */
+function toSummary(snap: ArchivedSession): ArchivedSessionSummary {
+  return {
+    id: snap.id,
+    title: snap.meta.title,
+    dateLabel: snap.meta.dateLabel,
+    segmentCount: snap.segments.length,
+    imageCount: snap.images.length,
+    createdAtEpoch: snap.createdAtEpoch,
+    endedAtEpoch: snap.endedAtEpoch,
   }
 }
 
@@ -133,6 +204,34 @@ export const useSession = create<SessionStore>()((set, get) => {
   // Allow the persistence helpers to read the latest state without capturing a stale ref.
   getStoreState = get
 
+  /**
+   * Snapshot the current session into the archive unless it is empty or unchanged since
+   * the last archive. Shared by archiveCurrentSession (public), resetSession, and
+   * loadArchivedSession so all three apply identical "never lose, never duplicate" rules.
+   * Returns the archive id used, or null when nothing was kept.
+   */
+  const archiveCurrent = async (): Promise<string | null> => {
+    // Capture the latest edits first so the snapshot is faithful.
+    await persistMetaNow()
+    const state = get()
+    if (state.segments.length === 0 && state.images.length === 0) return null
+
+    // Nothing changed since the last archive (e.g. New session immediately after a load,
+    // or two archive calls in a row): the session is already preserved, so reuse its id
+    // rather than writing a duplicate. Any real mutation has bumped mutationSeq past
+    // lastArchivedSeq, so an edit can never be deduped away.
+    if (mutationSeq === lastArchivedSeq && lastArchivedId != null) return lastArchivedId
+
+    // Pin the sequence we are about to persist BEFORE awaiting, so a concurrent mutation
+    // during the write bumps mutationSeq beyond it and is not lost to a later dedup.
+    const seqAtSnapshot = mutationSeq
+    const id = newId()
+    await db.putArchivedSession(snapshotSession(state, id))
+    lastArchivedSeq = seqAtSnapshot
+    lastArchivedId = id
+    return id
+  }
+
   return {
     ...freshState(),
 
@@ -142,6 +241,7 @@ export const useSession = create<SessionStore>()((set, get) => {
         status: 'recording',
         connection: 'live',
       }))
+      markDirty()
       void persistMetaNow()
     },
 
@@ -151,6 +251,7 @@ export const useSession = create<SessionStore>()((set, get) => {
 
     stopRecording: () => {
       set({ status: 'stopped', endedAtEpoch: Date.now(), connection: 'idle' })
+      markDirty()
       void persistMetaNow()
     },
 
@@ -168,6 +269,7 @@ export const useSession = create<SessionStore>()((set, get) => {
         edited: false,
       }
       set((s) => ({ segments: [...s.segments, seg], interimText: '' }))
+      markDirty()
       void db.putSegment(seg)
     },
 
@@ -180,16 +282,21 @@ export const useSession = create<SessionStore>()((set, get) => {
           return updated
         }),
       }))
-      if (updated) void db.putSegment(updated)
+      if (updated) {
+        markDirty()
+        void db.putSegment(updated)
+      }
     },
 
     deleteSegment: (id) => {
       set((s) => ({ segments: s.segments.filter((seg) => seg.id !== id) }))
+      markDirty()
       void db.deleteSegment(id)
     },
 
     addImage: (img) => {
       set((s) => ({ images: [...s.images, img] }))
+      markDirty()
       persistMetaDebounced()
     },
 
@@ -197,21 +304,25 @@ export const useSession = create<SessionStore>()((set, get) => {
       set((s) => ({
         images: s.images.map((img) => (img.id === id ? { ...img, ...patch } : img)),
       }))
+      markDirty()
       persistMetaDebounced()
     },
 
     removeImage: (id) => {
       set((s) => ({ images: s.images.filter((img) => img.id !== id) }))
+      markDirty()
       persistMetaDebounced()
     },
 
     setMeta: (patch) => {
       set((s) => ({ meta: { ...s.meta, ...patch } }))
+      markDirty()
       persistMetaDebounced()
     },
 
     setClockOffsetMs: (ms) => {
       set({ clockOffsetMs: ms })
+      markDirty()
       persistMetaDebounced()
     },
 
@@ -240,14 +351,87 @@ export const useSession = create<SessionStore>()((set, get) => {
     },
 
     resetSession: async () => {
+      // Preserve the outgoing session permanently BEFORE clearing, so "New session" can
+      // never destroy prior work. archiveCurrent() flushes pending meta itself.
+      await archiveCurrent()
       // Cancel any queued meta write so it can't resurrect data into the cleared store.
       cancelPendingMeta()
       await db.clearAll()
+      // The new blank session has not been archived; reset the dedup guard so its first
+      // real content can be archived later.
+      lastArchivedSeq = -1
+      lastArchivedId = null
       set(() => freshState())
     },
 
     flushMeta: async () => {
       await persistMetaNow()
+    },
+
+    archiveCurrentSession: async () => {
+      return archiveCurrent()
+    },
+
+    listArchivedSessions: async () => {
+      const all = await db.getAllArchivedSessions()
+      return all.map(toSummary)
+    },
+
+    loadArchivedSession: async (id) => {
+      // Never lose the session currently open: archive it first.
+      await archiveCurrent()
+      const snap = await db.getArchivedSession(id)
+      if (!snap) return
+
+      // Cancel any debounced meta write queued against the outgoing session so it can't
+      // land on top of the restored one.
+      cancelPendingMeta()
+
+      const meta: MetaRecord = {
+        meta: snap.meta,
+        images: snap.images,
+        clockOffsetMs: snap.clockOffsetMs,
+        startedAtEpoch: snap.startedAtEpoch,
+        endedAtEpoch: snap.endedAtEpoch,
+        status: snap.status,
+      }
+      // Atomically swap the persisted 'current' record to the restored snapshot so the
+      // outgoing session's segments can never interleave with the restored ones.
+      await db.replaceCurrent(snap.segments, meta)
+
+      set(() => {
+        const base = freshState()
+        const next: SessionState = {
+          ...base,
+          meta: snap.meta,
+          // Snapshots are stored already ordered by startedAtEpoch.
+          segments: snap.segments,
+          images: snap.images,
+          clockOffsetMs: snap.clockOffsetMs,
+          startedAtEpoch: snap.startedAtEpoch,
+          endedAtEpoch: snap.endedAtEpoch,
+          status: snap.status,
+          // `connection` stays at its fresh 'idle' default: restoring a session does not
+          // start the transcription engine.
+        }
+        return next
+      })
+
+      // The freshly loaded session already exists in the archive under `id`; mark it as
+      // archived at the current mutationSeq so an immediate New session does not write a
+      // duplicate, while any subsequent edit (which bumps mutationSeq) still re-archives.
+      lastArchivedSeq = mutationSeq
+      lastArchivedId = id
+    },
+
+    deleteArchivedSession: async (id) => {
+      await db.deleteArchivedSession(id)
+      // If we just deleted the snapshot the dedup guard points at, drop the guard so a
+      // later New session re-archives the (now un-backed) current session.
+      if (lastArchivedId === id) {
+        lastArchivedSeq = -1
+        lastArchivedId = null
+      }
     },
   }
 })

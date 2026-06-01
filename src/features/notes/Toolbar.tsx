@@ -9,11 +9,13 @@
  * The session masthead, notes body, image dock, and export bar all live in their own
  * Layout slots, so they are intentionally absent here.
  */
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ChangeEvent, KeyboardEvent } from 'react'
-import { IconButton } from '../../components/ui.tsx'
+import { Button, IconButton } from '../../components/ui.tsx'
 import { LiveTranscriber } from '../transcription/LiveTranscriber.tsx'
+import { SessionsPanel } from '../sessions/SessionsPanel.tsx'
 import { useNotesUi } from './search-store.ts'
+import { useSession } from '../../store.ts'
 
 /** Woven-thread mark — three interlaced strokes echoing the "NoteWeave" idea. */
 function Wordmark() {
@@ -148,10 +150,137 @@ function SearchBox() {
   )
 }
 
+/**
+ * "New session" control. Starts a fresh class on the page. resetSession() auto-archives the
+ * outgoing session to Sessions first, so this is non-destructive (nothing is lost), but it is
+ * still a deliberate context switch, so we confirm. Sits beside the wordmark with the other
+ * session-level chrome. The confirm is an inline dialog (chrome, never prints).
+ */
+function NewSessionControl() {
+  const resetSession = useSession((s) => s.resetSession)
+  const setQuery = useNotesUi((s) => s.setQuery)
+  const [confirming, setConfirming] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  const close = useCallback(() => {
+    setConfirming(false)
+    rootRef.current?.querySelector<HTMLButtonElement>('button[aria-haspopup="dialog"]')?.focus()
+  }, [])
+
+  useEffect(() => {
+    if (!confirming) return
+    // Focus the safe (Cancel) action first; it is the first button inside the dialog.
+    rootRef.current?.querySelector<HTMLButtonElement>('[role="dialog"] button')?.focus()
+    const onDown = (e: MouseEvent): void => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setConfirming(false)
+    }
+    const onKey = (e: globalThis.KeyboardEvent): void => {
+      if (e.key === 'Escape') close()
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [confirming, close])
+
+  const confirm = useCallback(async () => {
+    setBusy(true)
+    try {
+      setQuery('') // a stale search query makes no sense against a fresh, empty session
+      await resetSession()
+    } finally {
+      setBusy(false)
+      // close() (not a bare setConfirming) so focus returns to the trigger, not <body>.
+      close()
+    }
+  }, [resetSession, setQuery, close])
+
+  return (
+    <div ref={rootRef} className="relative">
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => setConfirming((c) => !c)}
+        aria-haspopup="dialog"
+        aria-expanded={confirming}
+        leading={
+          <span aria-hidden="true" className="text-[15px] leading-none">
+            ＋
+          </span>
+        }
+      >
+        <span className="hidden sm:inline">New session</span>
+        <span className="sr-only sm:hidden">New session</span>
+      </Button>
+
+      {confirming && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Start a new session"
+          data-chrome="true"
+          className="absolute left-0 top-full z-50 mt-2 w-72 rounded-[var(--nw-radius-lg)] border border-[color:var(--color-hairline)] bg-[color:var(--nw-surface)] p-3.5 text-left shadow-[var(--nw-shadow-lg)] print:hidden"
+        >
+          <p className="font-serif text-sm font-semibold text-ink">Start a new session?</p>
+          <p className="mt-1 text-[13px] leading-relaxed text-ink-soft">
+            Your current notes are saved to Sessions. This clears the page for a fresh class.
+          </p>
+          <div className="mt-3 flex items-center justify-end gap-2">
+            <Button variant="ghost" size="sm" onClick={close} disabled={busy}>
+              Cancel
+            </Button>
+            <Button variant="primary" size="sm" onClick={() => void confirm()} disabled={busy}>
+              {busy ? 'Saving…' : 'Start new'}
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Saved-sessions entry. A compact control that opens the archive browser. It sits with the
+ * session-level chrome on the left (beside the wordmark, where a "new session" action would
+ * also belong) so the center recording surface and the right-hand search stay uncrowded.
+ * Owns only its own open/close state; the dialog itself is chrome and never prints.
+ */
+function SessionsControl() {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => setOpen(true)}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        leading={
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.5" />
+            <path d="M8 4.5V8l2.5 1.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        }
+      >
+        <span className="hidden sm:inline">Sessions</span>
+        <span className="sr-only sm:hidden">Saved sessions</span>
+      </Button>
+      <SessionsPanel open={open} onClose={() => setOpen(false)} />
+    </>
+  )
+}
+
 export function Toolbar() {
   return (
     <div className="mx-auto flex w-full max-w-[1320px] items-center justify-between gap-3 px-4 py-2.5 lg:gap-6 lg:px-6">
-      <Wordmark />
+      <div className="flex shrink-0 items-center gap-2 sm:gap-3">
+        <Wordmark />
+        <NewSessionControl />
+        <SessionsControl />
+      </div>
       <div className="flex min-w-0 flex-1 items-center justify-center">
         <LiveTranscriber />
       </div>

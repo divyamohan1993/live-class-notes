@@ -73,14 +73,20 @@ export interface TranscriptionEngineCallbacks {
 }
 
 /**
- * A swappable speech-to-text engine. The locked contract is `start` / `stop` / `supported`;
- * events are delivered through the callbacks supplied at construction.
+ * A swappable speech-to-text engine. The locked contract is `start` / `stop` / `reset` /
+ * `supported`; events are delivered through the callbacks supplied at construction.
  */
 export interface TranscriptionEngine {
   /** Begin recognition. Safe to call only when not already running (host guards this). */
   start(): void
   /** Stop recognition. Fires `onEnd` asynchronously once the vendor closes the stream. */
   stop(): void
+  /**
+   * Hard reset: synchronously abandon the current session so it can NEVER emit another event
+   * (no late onStart/onEnd). Unlike stop(), this does NOT promise an onEnd — the host has
+   * already given up on the session. Used to recover a wedged start. A no-op when idle.
+   */
+  reset(): void
   /** True when this engine can run in the current browser. */
   readonly supported: boolean
 }
@@ -100,9 +106,13 @@ function resolveCtor(): SpeechRecognitionCtor | null {
 /**
  * Web Speech API implementation of {@link TranscriptionEngine}.
  *
- * Configured for continuous dictation (continuous + interimResults, single best
- * alternative). Each `start()` builds a fresh recognizer instance: Chromium's recognizer is
- * single-use in practice and reusing one across stop/start cycles is a known source of
+ * Configured for continuous dictation (continuous + interimResults). We request up to 3
+ * alternatives (`maxAlternatives = 3`) but always commit the recognizer's top-ranked guess
+ * (`result[0]`): asking for alternatives nudges Chromium to still RETURN its best hypothesis
+ * for unclear / accented / slurred audio instead of withholding a final, and we deliberately
+ * never filter by confidence — every non-empty final is committed so the notes keep up with
+ * everything heard. Each `start()` builds a fresh recognizer instance: Chromium's recognizer
+ * is single-use in practice and reusing one across stop/start cycles is a known source of
  * silent stalls, so we create-and-discard per session. The engine stamps an utterance's
  * start time when its first interim arrives and clears it on finalize.
  */
@@ -137,7 +147,10 @@ export class WebSpeechEngine implements TranscriptionEngine {
     recognition.lang = this.opts.lang
     recognition.continuous = true
     recognition.interimResults = true
-    recognition.maxAlternatives = 1
+    // Request 3 alternatives but commit only the top-ranked guess (result[0]) below; this coaxes
+    // Chromium into returning its best hypothesis for unclear/accented/slurred audio rather than
+    // withholding a final. We never score or filter by confidence.
+    recognition.maxAlternatives = 3
 
     recognition.onstart = () => {
       // Audio is being captured and streamed: signal the session opened and is live.
@@ -205,6 +218,19 @@ export class WebSpeechEngine implements TranscriptionEngine {
     } catch {
       // Ignore: the session may already be closing; onend will still fire.
     }
+  }
+
+  /**
+   * Hard reset: detach handlers, abort, and DROP the recognizer instance immediately. Unlike
+   * stop() (which abort()s but leaves the instance and its handlers wired so onEnd can still
+   * fire), reset() guarantees the current instance can never emit another event. The host uses
+   * this to recover a WEDGED start — a recognizer that fired neither onstart nor onend (a real
+   * Chromium failure mode after network blips / rapid cycles). After reset() the host owns the
+   * "is it running" truth outright and can safely start a fresh session with no risk of a late,
+   * stale onstart/onend from the abandoned instance corrupting its state.
+   */
+  reset(): void {
+    this.teardown()
   }
 
   /** Detach handlers and drop the recognizer reference so a stale instance can't emit. */

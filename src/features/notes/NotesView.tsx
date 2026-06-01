@@ -338,6 +338,173 @@ function PrintDocument({ entries }: { entries: TimelineEntry[] }) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Connection recovery status
+ * ------------------------------------------------------------------ */
+
+/** How long the brief, reassuring confirmations (reconnected / session complete) linger. */
+const CONFIRMATION_VISIBLE_MS = 4000
+
+/**
+ * Reassures the reader, inside the document, that their notes are safe while the
+ * transcription connection is recovering, and confirms briefly when it comes back or when
+ * the session finishes.
+ *
+ * Deliberately a separate component (not part of NotesView's body) so subscribing to
+ * `connection` / `status` never re-renders the virtualized timeline; this is purely
+ * viewport chrome, stacked just above the live interim line. It stays out of the way and
+ * never blocks the notes (pointer-events-none), and is marked chrome + print:hidden so it
+ * never exports.
+ *
+ * What it shows:
+ *   - a calm amber "Microphone is blocked" line whenever `connection` is `error` (a
+ *     permission block the user must resolve; shown regardless of status, never auto-hidden);
+ *   - while recording: a calm amber banner for `reconnecting` (covers both a service
+ *     reconnect and a busy/locked microphone that auto-recovers) and `offline`;
+ *   - a short green "Reconnected" confirmation once the connection returns to `live` after
+ *     having been away;
+ *   - a short green "Session complete. Saved." confirmation when the session enters
+ *     `stopped` (manual Stop or the idle auto-complete, which can fire from paused too).
+ * Nothing shows for a normal `live` connection, while idle, or while paused.
+ */
+function RecoveryStatus() {
+  const connection = useSession((s) => s.connection)
+  const status = useSession((s) => s.status)
+
+  // Previous connection / status values, so we can detect transitions without store fields.
+  // Both are seeded with the current value so the first render (incl. a hydrated 'stopped'
+  // session) never flashes a confirmation that didn't just happen.
+  const prevConnection = useRef(connection)
+  const prevStatus = useRef(status)
+  const [showReconnected, setShowReconnected] = useState(false)
+  const [showComplete, setShowComplete] = useState(false)
+  // Separate timers: a reconnect and a session-complete confirmation must not cancel
+  // each other (they can never co-display, but each owns its own auto-hide lifecycle).
+  const reconnectedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const completeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Detect connection coming back to `live` after a reconnecting/offline spell.
+  useEffect(() => {
+    const wasRecovering =
+      prevConnection.current === 'reconnecting' || prevConnection.current === 'offline'
+    // Always keep the ref current (ungated), so the transition check never goes stale.
+    prevConnection.current = connection
+
+    if (connection === 'live' && wasRecovering) {
+      setShowReconnected(true)
+      if (reconnectedTimer.current != null) clearTimeout(reconnectedTimer.current)
+      reconnectedTimer.current = setTimeout(() => {
+        reconnectedTimer.current = null
+        setShowReconnected(false)
+      }, CONFIRMATION_VISIBLE_MS)
+    } else if (connection !== 'live') {
+      // Connection left "live" again (e.g. a flap): drop any pending confirmation at once.
+      if (reconnectedTimer.current != null) {
+        clearTimeout(reconnectedTimer.current)
+        reconnectedTimer.current = null
+      }
+      setShowReconnected(false)
+    }
+  }, [connection])
+
+  // Detect the session finishing: entry into `stopped` from any other state. We watch for
+  // entry (not strictly recording -> stopped) because the idle auto-complete can stop a
+  // paused session too, and that finish deserves the same confirmation.
+  useEffect(() => {
+    const justStopped = prevStatus.current !== 'stopped' && status === 'stopped'
+    prevStatus.current = status
+
+    if (justStopped) {
+      setShowComplete(true)
+      if (completeTimer.current != null) clearTimeout(completeTimer.current)
+      completeTimer.current = setTimeout(() => {
+        completeTimer.current = null
+        setShowComplete(false)
+      }, CONFIRMATION_VISIBLE_MS)
+    } else if (status !== 'stopped') {
+      // Recording again (a new session): clear any lingering completion confirmation.
+      if (completeTimer.current != null) {
+        clearTimeout(completeTimer.current)
+        completeTimer.current = null
+      }
+      setShowComplete(false)
+    }
+  }, [status])
+
+  // Clear both timers if we unmount mid-confirmation (e.g. the document empties).
+  useEffect(
+    () => () => {
+      if (reconnectedTimer.current != null) clearTimeout(reconnectedTimer.current)
+      if (completeTimer.current != null) clearTimeout(completeTimer.current)
+    },
+    [],
+  )
+
+  const isRecording = status === 'recording'
+  // A blocked microphone is a terminal condition the user must resolve, so it is shown
+  // regardless of status (it is not auto-retried, unlike reconnecting/offline) and takes
+  // priority over every other state.
+  const showError = connection === 'error'
+  const showReconnecting = isRecording && connection === 'reconnecting'
+  const showOffline = isRecording && connection === 'offline'
+
+  // The confirmations can outlast recording (you may stop right as the connection returns,
+  // and "complete" is itself a stopped-state message), so they aren't gated on recording;
+  // the live recovering banners are. Session-complete takes precedence over the recovering
+  // banners: once stopped, the connection no longer matters.
+  if (!showError && !showReconnecting && !showOffline && !showReconnected && !showComplete) {
+    return null
+  }
+
+  // Two visual registers: a calm amber "attention" tone for anything still in flight or
+  // needing the reader (error / reconnecting / offline), and a green "all good" tone for
+  // the brief confirmations. Within attention, only the auto-retrying states pulse; the
+  // blocked-mic error is static because it waits on the user, not on the network.
+  const attention = showError || showReconnecting || showOffline
+  const message = showError
+    ? 'Microphone is blocked. Allow microphone access in your browser, then press Record again.'
+    : showComplete
+      ? 'Session complete. Saved.'
+      : showOffline
+        ? 'You appear to be offline. Recording will resume automatically when you are back online. Your notes are saved.'
+        : showReconnecting
+          ? 'Reconnecting. Your notes so far are saved.'
+          : 'Reconnected. Recording continues.'
+
+  return (
+    <div
+      data-chrome="true"
+      aria-live="polite"
+      className="pointer-events-none fixed inset-x-0 bottom-16 z-20 flex justify-center px-4 print:hidden"
+    >
+      <div
+        className={
+          'flex w-full max-w-[820px] items-center gap-2.5 rounded-[var(--nw-radius-lg)] border px-4 py-2.5 text-sm font-medium shadow-[var(--nw-shadow-md)] backdrop-blur ' +
+          (attention
+            ? 'border-[color:var(--nw-warning)]/30 bg-[color:#fbf0e3]/95 text-[color:var(--nw-warning)]'
+            : 'border-[color:var(--nw-success)]/30 bg-[color:#e6f4ec]/95 text-[color:var(--nw-success)]')
+        }
+      >
+        {showError ? (
+          <span aria-hidden="true" className="shrink-0 text-base leading-none">
+            ⚠
+          </span>
+        ) : attention ? (
+          <span
+            aria-hidden="true"
+            className="inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-current"
+          />
+        ) : (
+          <span aria-hidden="true" className="shrink-0 text-base leading-none">
+            ✓
+          </span>
+        )}
+        <span className="min-w-0 flex-1">{message}</span>
+      </div>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ *
  * NotesView
  * ------------------------------------------------------------------ */
 
@@ -545,6 +712,9 @@ export function NotesView() {
           </div>
         </div>
       )}
+
+      {/* In-document recovery reassurance: separate chrome, stacks above the interim line. */}
+      <RecoveryStatus />
 
       {/* Jump to live — fixed chrome, shown only when the reader scrolled away mid-record. */}
       {isRecording && !atTail && (
