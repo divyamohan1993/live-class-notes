@@ -1,0 +1,193 @@
+@import "tailwindcss";
+
+/*
+ * NoteWeave design tokens.
+ * Enterprise-professional: warm paper surfaces, confident indigo accent, ink-on-paper
+ * document typography. Feature agents style their own components with these tokens and
+ * Tailwind utilities; this file owns only the palette, base body, and print rules.
+ */
+
+:root {
+  /* Surfaces */
+  --nw-paper: #fbfaf8; /* warm app background */
+  --nw-surface: #ffffff; /* cards / panels */
+  --nw-surface-muted: #f4f2ee; /* subtle fills, hover */
+
+  /* Ink */
+  --nw-ink: #1f2328; /* primary text */
+  --nw-ink-soft: #3b424b; /* secondary text */
+  --nw-muted: #6b7280; /* tertiary / captions */
+
+  /* Accent (deep indigo) */
+  --nw-accent: #314c8c;
+  --nw-accent-strong: #243a6b;
+  --nw-accent-soft: #e8edf7;
+  --nw-accent-contrast: #ffffff;
+
+  /* Feedback */
+  --nw-danger: #b42318;
+  --nw-danger-soft: #fbeae8;
+  --nw-success: #1a7f55;
+  --nw-warning: #b25e09;
+
+  /* Lines & elevation */
+  --nw-border: #e6e2da; /* hairline borders */
+  --nw-border-strong: #d6d1c7;
+  --nw-ring: #314c8c;
+  --nw-shadow-sm: 0 1px 2px rgba(31, 35, 40, 0.06), 0 1px 1px rgba(31, 35, 40, 0.04);
+  --nw-shadow-md: 0 4px 12px rgba(31, 35, 40, 0.08), 0 1px 3px rgba(31, 35, 40, 0.05);
+  --nw-shadow-lg: 0 12px 32px rgba(31, 35, 40, 0.12), 0 2px 8px rgba(31, 35, 40, 0.06);
+
+  /* Type */
+  --nw-font-ui: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --nw-font-doc: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, ui-serif, serif;
+  --nw-font-mono: "Cascadia Code", "SFMono-Regular", "Consolas", ui-monospace, monospace;
+
+  /* Geometry */
+  --nw-radius: 10px;
+  --nw-radius-sm: 6px;
+  --nw-radius-lg: 16px;
+}
+
+/*
+ * Expose the most-used tokens to Tailwind v4 as utilities (bg-accent, text-ink,
+ * border-hairline, etc.) and as the default font families. Tailwind v4 reads @theme.
+ */
+@theme {
+  --color-paper: var(--nw-paper);
+  --color-surface: var(--nw-surface);
+  --color-surface-muted: var(--nw-surface-muted);
+
+  --color-ink: var(--nw-ink);
+  --color-ink-soft: var(--nw-ink-soft);
+  --color-muted: var(--nw-muted);
+
+  --color-accent: var(--nw-accent);
+  --color-accent-strong: var(--nw-accent-strong);
+  --color-accent-soft: var(--nw-accent-soft);
+  --color-accent-contrast: var(--nw-accent-contrast);
+
+  --color-danger: var(--nw-danger);
+  --color-danger-soft: var(--nw-danger-soft);
+  --color-success: var(--nw-success);
+  --color-warning: var(--nw-warning);
+
+  --color-hairline: var(--nw-border);
+  --color-hairline-strong: var(--nw-border-strong);
+
+  --font-sans: var(--nw-font-ui);
+  --font-serif: var(--nw-font-doc);
+  --font-mono: var(--nw-font-mono);
+
+  --radius-nw: var(--nw-radius);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background-color: var(--nw-paper);
+  color: var(--nw-ink);
+  font-family: var(--nw-font-ui);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+#root {
+  min-height: 100vh;
+  isolation: isolate;
+}
+
+/* Accessible focus ring for keyboard users across all interactive atoms. */
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--nw-ring);
+  outline-offset: 2px;
+  border-radius: var(--nw-radius-sm);
+}
+
+/* Honor reduced-motion preferences globally. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Thin, unobtrusive scrollbars suited to long transcripts. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--nw-border-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background-color: var(--nw-border-strong);
+  border-radius: 999px;
+  border: 2px solid var(--nw-paper);
+}
+
+/*
+ * Print base. App chrome (toolbars, docks, buttons) is marked [data-chrome="true"]
+ * and hidden; the notes page expands full-width with black ink on white for clean
+ * PDF/paper export.
+ */
+@media print {
+  @page {
+    margin: 16mm;
+  }
+
+  html,
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  [data-chrome="true"] {
+    display: none !important;
+  }
+
+  [data-print-page="true"] {
+    max-width: none !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+    border: none !important;
+    background: #ffffff !important;
+  }
+
+  a {
+    color: #000000 !important;
+    text-decoration: none !important;
+  }
+
+  /* Avoid splitting equations, figures, and headings across pages. */
+  .katex-display,
+  figure,
+  img,
+  h1,
+  h2,
+  h3 {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+}
