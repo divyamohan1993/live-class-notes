@@ -23,8 +23,8 @@ import { useWakeLock } from './useWakeLock.ts'
 
 /** Supported transcription languages. Web Speech accepts BCP-47 tags. */
 const LANGUAGES: ReadonlyArray<{ value: string; label: string }> = [
-  { value: 'en-US', label: 'English (US)' },
   { value: 'en-IN', label: 'English (India)' },
+  { value: 'en-US', label: 'English (US)' },
   { value: 'en-GB', label: 'English (UK)' },
 ]
 
@@ -187,6 +187,22 @@ export function LiveTranscriber(): ReactElement {
           {segmentCount} {segmentCount === 1 ? 'segment' : 'segments'}
         </span>
       </span>
+
+      {/*
+        Keep-visible nudge. Browsers throttle (and can suspend) background tabs, which pauses
+        Web Speech; the screen wake lock keeps the display on but does NOT stop tab-switch
+        throttling. For a multi-hour lecture the safe operating mode is "leave this tab in the
+        foreground", so we say so plainly while recording.
+      */}
+      {isRecording && (
+        <span
+          className="inline-flex items-center gap-1 text-xs text-muted"
+          title="Browsers slow down or pause background tabs, which can pause live transcription. Keep this tab visible (you can dim the screen) for the whole session."
+        >
+          <span aria-hidden="true">👁</span>
+          Keep this tab visible
+        </span>
+      )}
 
       {/* Resume-after-reload prompt: never auto-starts the mic without a gesture. */}
       {needsResume && (

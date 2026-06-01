@@ -12,11 +12,13 @@
  *   - Restart policy reads `store.status`, which we always update BEFORE tearing the engine
  *     down. So onEnd's rule is simply: status==='recording' → restart, else stay down. A
  *     deliberate stop sets a `stopping` flag so onEnd doesn't auto-restart.
- *   - We SUBSCRIBE to store.status to drive start/stop. Zustand fires subscriptions only on
- *     change, never for the initial value, so a hydrated status==='recording' (after a
- *     reload) does NOT auto-start the mic — the user must press Resume, satisfying the
- *     browser's user-gesture requirement. A separate lang subscription bounces the engine to
- *     apply a new language while recording.
+ *   - We SUBSCRIBE to store.status to drive start/stop, but the microphone only ever opens
+ *     after an explicit user gesture in the current page load (tracked by gestureStartedRef).
+ *     A session restored from IndexedDB as status==='recording' is applied by hydrate() as a
+ *     state change AFTER this hook subscribes, so without that latch the subscription would
+ *     auto-start the mic on reload. Instead we leave it down and wait for the Resume prompt's
+ *     click (which also satisfies the browser's user-gesture requirement). A separate lang
+ *     subscription bounces the engine to apply a new language while recording.
  *
  * Chronological invariant: image placement depends on segment start times being
  * monotonically non-decreasing. Every commit clamps `startedAtEpoch` up to the last
@@ -29,12 +31,21 @@ import { useSession } from '../../store.ts'
 import { WebSpeechEngine } from './engine.ts'
 import type { TranscriptionEngine } from './engine.ts'
 
-/** Watchdog cadence and the silence threshold that triggers a forced restart. */
-const WATCHDOG_INTERVAL_MS = 8_000
-const SILENCE_LIMIT_MS = 12_000
-/** Auto-restart backoff bounds; escalates only when a session ends without yielding results. */
-const BACKOFF_MIN_MS = 250
-const BACKOFF_MAX_MS = 5_000
+/**
+ * Watchdog cadence and silence threshold for forcing a restart. Kept aggressive on purpose:
+ * over a multi-hour lecture, restarting during a genuine pause costs nothing (no speech is lost
+ * during silence), while a fast watchdog recovers a silently-stalled recognizer before it drops
+ * large chunks. So we check often and forgive only a short stall.
+ */
+const WATCHDOG_INTERVAL_MS = 2_500
+const SILENCE_LIMIT_MS = 5_000
+/**
+ * Auto-restart backoff bounds. The normal case (a clean end mid-talk) restarts almost
+ * immediately to minimize the seam gap; backoff only grows when restarts keep failing (service
+ * genuinely unreachable) and is capped low so we never sit idle long enough to lose much.
+ */
+const BACKOFF_MIN_MS = 200
+const BACKOFF_MAX_MS = 1_500
 
 export interface UseSpeechRecognition {
   supported: boolean
@@ -82,6 +93,12 @@ export function useSpeechRecognition(): UseSpeechRecognition {
    * to react to, so the Resume click must bring the engine up directly within the gesture.
    */
   const ensureRunningRef = useRef<() => void>(() => {})
+  /**
+   * Latches true once the user explicitly starts/resumes recording in THIS page load. Gates
+   * every auto-start path so a session restored from IndexedDB as status==='recording' never
+   * opens the microphone without a gesture; it waits for the Resume prompt instead.
+   */
+  const gestureStartedRef = useRef(false)
 
   useEffect(() => {
     const markActivity = (): void => {
@@ -257,8 +274,10 @@ export function useSpeechRecognition(): UseSpeechRecognition {
     const unsubStatus = useSession.subscribe((state, prev) => {
       if (state.status === prev.status) return
       if (state.status === 'recording') {
-        // Started or resumed by a user gesture → bring the engine up.
-        ensureRunning()
+        // Only a real user gesture may open the mic. A session restored from disk as
+        // 'recording' (hydrate applies it as a change after we subscribed) must wait for the
+        // Resume prompt rather than auto-starting here.
+        if (gestureStartedRef.current) ensureRunning()
       } else {
         // paused / stopped / idle → take the engine down. onEnd sees the non-recording
         // status (set before this) and stays down.
@@ -293,6 +312,8 @@ export function useSpeechRecognition(): UseSpeechRecognition {
     // --- Network transitions. Resume on reconnect, surface offline immediately.
     const onOnline = (): void => {
       if (useSession.getState().status !== 'recording') return
+      // Never resurrect a session the user has not actively started in this page load.
+      if (!gestureStartedRef.current) return
       useSession.getState().setConnection('reconnecting')
       backoffRef.current = BACKOFF_MIN_MS
       if (!runningRef.current && !startingRef.current) ensureRunning()
@@ -332,6 +353,8 @@ export function useSpeechRecognition(): UseSpeechRecognition {
   const start = (): void => {
     const state = useSession.getState()
     setError(null)
+    // The user has now explicitly asked to record/resume; unlock the auto-keep-alive machinery.
+    gestureStartedRef.current = true
     if (state.status === 'recording') {
       // Reload-resume: status was persisted as 'recording' but the engine isn't running and
       // the status subscription won't fire (no state change). Bring it up directly, inside

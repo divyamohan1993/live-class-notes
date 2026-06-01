@@ -66,7 +66,7 @@ function defaultMeta(): SessionMeta {
     instructor: '',
     dateLabel: formatDateLabel(Date.now()),
     summary: '',
-    lang: 'en-US',
+    lang: 'en-IN',
   }
 }
 

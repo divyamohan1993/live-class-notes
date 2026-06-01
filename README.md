@@ -19,7 +19,7 @@ pnpm install
 pnpm dev
 ```
 
-Open **http://localhost:5173** in Chrome or Edge.
+Open **http://localhost:5173** in Chrome or Edge. Use the `localhost` address, not the LAN address Vite also prints (`http://10.x.x.x:5173`); the microphone and live transcription only work in a secure context, and `localhost` qualifies while a plain `http://` LAN address does not.
 
 To create an optimized build: `pnpm build`, then `pnpm preview`.
 
@@ -29,6 +29,7 @@ To create an optimized build: `pnpm build`, then `pnpm preview`.
 
 1. **Name the session.** Set the title, course, and instructor at the top (or click **Auto-title** later and it names itself from the content).
 2. **Press Record.** Allow the microphone when prompted. The talk streams in as live text, paragraph by paragraph, with a timestamp in the margin. Leave it running for the whole lecture; it keeps itself alive across pauses, network blips, and silence.
+   - **Keep this tab visible while recording.** Browsers throttle and can suspend background tabs, which pauses live transcription. Keep NoteWeave in the foreground for the whole session (you can dim the screen; it holds a screen wake-lock). If the tab is backgrounded it reconnects automatically when you return, but words spoken while it was suspended are not captured. For long lectures, give it its own window.
 3. **Take photos as usual** on your phone or camera during class. Do nothing else with them yet.
 4. **Import the photos afterwards** (drag them onto the Photos panel, or click to choose). Each photo reads its own EXIF capture time and lands next to the words that were being spoken at that moment.
 5. **Calibrate if a photo lands by the wrong sentence.** Your camera's clock is rarely in perfect sync with this computer's. Drag the **Camera clock offset** slider and watch the photos slide into place live. Photos with no timestamp wait in the **Unplaced** tray; pin them where you want.
