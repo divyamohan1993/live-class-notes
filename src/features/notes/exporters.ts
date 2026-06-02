@@ -15,6 +15,7 @@
  *            embedded) built with the `docx` package.
  */
 import katex from 'katex'
+import { mathify } from '../../lib/mathify.ts'
 // `docx` is heavy and only `exportDocx` needs it, so the runtime values are pulled in via
 // a dynamic import() inside that function (keeping it out of the initial bundle). We import
 // only the Paragraph TYPE here for annotations — `import type` emits no runtime dependency.
@@ -237,7 +238,7 @@ export function exportHtml(): void {
         return (
           `<p class="seg">` +
           `<span class="ts">${escapeHtml(formatClock(entry.segment.startedAtEpoch))}</span>` +
-          `<span class="txt">${segmentHtml(entry.segment.text)}</span>` +
+          `<span class="txt">${segmentHtml(mathify(entry.segment.text))}</span>` +
           `</p>`
         )
       }
@@ -337,7 +338,7 @@ export function exportMarkdown(): void {
   for (const entry of entries) {
     if (entry.kind === 'segment') {
       // Timestamp as a small italic lead-in; math source ($...$) is kept verbatim.
-      lines.push(`*${formatClock(entry.segment.startedAtEpoch)}* — ${entry.segment.text}`, '')
+      lines.push(`*${formatClock(entry.segment.startedAtEpoch)}* — ${mathify(entry.segment.text)}`, '')
     } else {
       const img = entry.image
       const alt = imageCaption(img).replace(/[[\]]/g, '')
@@ -465,7 +466,7 @@ export async function exportDocx(): Promise<void> {
               size: 16,
             }),
             // Math stays as readable LaTeX source ($...$) since Word can't render KaTeX.
-            new TextRun({ text: entry.segment.text, size: 24 }),
+            new TextRun({ text: mathify(entry.segment.text), size: 24 }),
           ],
         }),
       )

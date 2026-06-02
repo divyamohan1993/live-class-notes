@@ -19,3 +19,5 @@ pnpm-debug.log*
 
 # Test / tooling artifacts
 .playwright-mcp/
+
+.vercel

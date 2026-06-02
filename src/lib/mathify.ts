@@ -80,6 +80,12 @@ const ORDINAL_POWER: Record<string, string> = {
   tenth: '10',
 }
 
+/** Spelled-out small cardinals -> digits. Safe: only commits if the whole span is math. */
+const NUMBER_WORD: Record<string, string> = {
+  zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5',
+  six: '6', seven: '7', eight: '8', nine: '9', ten: '10',
+}
+
 /**
  * One rewrite rule. Rules run in array order; multiword/longer patterns must precede
  * shorter ones (e.g. "square root of" before "root"/"square"). Each `apply` returns
@@ -109,6 +115,37 @@ function rule(re: RegExp, repl: string | ((...m: string[]) => string)): Rule {
  * the words inside structural phrases like "square root of".
  */
 const RULES: Rule[] = [
+  // --- Optimization / analysis (multiword; run early so they win over bare ops) ----
+  // "subject to" / "such that" -> \text{...}; isCleanMath strips \text{...} so the
+  // English inside never trips the prose gate. (Generic "f of x" runs later, after the
+  // structural rules, so it can't eat the "of" inside "integral from a to b of ...".)
+  rule(/\bsubject\s+to\b/gi, ' \\;\\text{subject to}\\; '),
+  rule(/\bsuch\s+that\b/gi, ' \\;\\text{s.t.}\\; '),
+  rule(/\bfor\s+all\b/gi, ' \\forall '),
+  rule(/\bthere\s+exists?\b/gi, ' \\exists '),
+  rule(/\b(?:arg\s*min|argmin)\b/gi, '\\arg\\min'),
+  rule(/\b(?:arg\s*max|argmax)\b/gi, '\\arg\\max'),
+  // "minimize over x" -> \min_{x}; bare "minimize" -> \min (also -ise spelling)
+  rule(/\bminimi[sz]e\s+over\s+([A-Za-z][0-9]*)\b/gi, (_m, v: string) => `\\min_{${v}}`),
+  rule(/\bmaximi[sz]e\s+over\s+([A-Za-z][0-9]*)\b/gi, (_m, v: string) => `\\max_{${v}}`),
+  rule(/\bminimi[sz]e\b/gi, '\\min'),
+  rule(/\bmaximi[sz]e\b/gi, '\\max'),
+  // "gradient of f" -> \nabla f ; bare "gradient" -> \nabla
+  rule(/\bgradient\s+of\s+([A-Za-z])\b/gi, (_m, f: string) => `\\nabla ${f}`),
+  rule(/\bgradient\b/gi, '\\nabla'),
+  // "norm of x" -> \lVert x \rVert
+  rule(/\bnorm\s+of\s+([A-Za-z][0-9]*)\b/gi, (_m, v: string) => `\\lVert ${v} \\rVert`),
+  // "transpose of X" / "X transpose" -> X^{\top}
+  rule(/\btranspose\s+of\s+([A-Za-z][0-9]*)\b/gi, (_m, v: string) => `${v}^{\\top}`),
+  rule(new RegExp(`\\b${VAR}\\s+transpose\\b`, 'gi'), (_m, v: string) => `${v}^{\\top}`),
+  // decorations: "x star" -> x^{*}, "x hat" -> \hat{x}, "x tilde" -> \tilde{x}
+  // ("x bar" intentionally omitted so "h bar" -> \hbar keeps working below).
+  rule(new RegExp(`\\b${VAR}\\s+star\\b`, 'gi'), (_m, v: string) => `${v}^{*}`),
+  rule(new RegExp(`\\b${VAR}\\s+hat\\b`, 'gi'), (_m, v: string) => `\\hat{${v}}`),
+  rule(new RegExp(`\\b${VAR}\\s+tilde\\b`, 'gi'), (_m, v: string) => `\\tilde{${v}}`),
+  // "sum over i" -> \sum_{i}
+  rule(/\b(?:sum|summation)\s+over\s+([A-Za-z])\b/gi, (_m, i: string) => `\\sum_{${i}}`),
+
   // --- Calculus: integrals (bounded first, then plain) ---------------------------
   // "integral from a to b of <body> d x" -> \int_{a}^{b} <body> \, dx
   rule(
@@ -187,6 +224,11 @@ const RULES: Rule[] = [
     (_m, a: string, b: string) => `\\frac{${a}}{${b}}`,
   ),
 
+  // "f of x" -> f(x): single letters only, and AFTER the structural rules above so it
+  // never eats the "of" inside "integral from a to b of ...". The prose gate guards
+  // mixed text, so a stray prose "X of Y" simply leaves the segment unchanged.
+  rule(/\b([A-Za-z])\s+of\s+([A-Za-z])\b/g, (_m, f: string, x: string) => `${f}(${x})`),
+
   // --- Greek letters --------------------------------------------------------------
   rule(
     new RegExp(`\\b(${Object.keys(GREEK).join('|')})\\b`, 'gi'),
@@ -196,7 +238,9 @@ const RULES: Rule[] = [
   // --- Named symbols --------------------------------------------------------------
   rule(/\binfinity\b/gi, '\\infty'),
   rule(/\bh\s*bar\b/gi, '\\hbar'),
-  rule(/\b(?:nabla|del)\b/gi, '\\nabla'),
+  // Negative lookbehind so this never re-matches the "nabla" inside a "\nabla" that the
+  // optimization "gradient" rule already produced (which would double the backslash).
+  rule(/(?<!\\)\b(?:nabla|del)\b/gi, '\\nabla'),
   rule(/\bdegrees?\b/gi, '^\\circ'),
 
   // --- Relational and arithmetic operators (multiword first) ----------------------
@@ -213,6 +257,12 @@ const RULES: Rule[] = [
   rule(/\bplus\b/gi, '+'),
   rule(/\bminus\b/gi, '-'),
   rule(/\bequals\b/gi, '='),
+
+  // --- Spelled-out small numbers (last; only survives the gate inside real math) ---
+  rule(
+    new RegExp(`\\b(${Object.keys(NUMBER_WORD).join('|')})\\b`, 'gi'),
+    (_m, w: string) => NUMBER_WORD[w.toLowerCase()],
+  ),
 ]
 
 /**
@@ -246,6 +296,9 @@ const KNOWN_MATH_WORDS = new Set<string>([
  */
 function isCleanMath(transformed: string): boolean {
   let s = transformed
+  // Drop \text{...} entirely: legitimate math prose like "subject to" / "s.t." lives
+  // there and must NOT be counted as leftover prose by the gate below.
+  s = s.replace(/\\text\{[^}]*\}/g, ' ')
   // Drop LaTeX command names (keep their letters out of the prose check).
   s = s.replace(/\\[A-Za-z]+/g, ' ')
   // Drop differentials "dx", "dy", "dt", … (a 'd' immediately before a single var).
@@ -305,6 +358,7 @@ const MATH_HINTS: RegExp[] = [
   /\b(plus|minus|times|divided by|equals|approximately|proportional to)\b/i,
   /\b(greater than|less than|plus or minus)\b/i,
   /\b(alpha|beta|gamma|delta|theta|lambda|sigma|omega|pi|mu|phi|infinity|nabla|del|h bar)\b/i,
+  /\b(minimi[sz]e|maximi[sz]e|subject to|such that|gradient|norm of|transpose|arg\s*min|arg\s*max|for all|there exists)\b/i,
   // Bare symbolic content: a single letter next to a digit or operator (e.g. "x = 3").
   /[A-Za-z]\s*[=+\-*/^]\s*[A-Za-z0-9]/,
 ]

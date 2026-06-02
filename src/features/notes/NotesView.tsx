@@ -134,6 +134,11 @@ const SegmentRow = memo(function SegmentRow({
     [editing, segment.text],
   )
 
+  // Auto-depict math: clean spoken equations (and any typed $...$) render as real math
+  // automatically. mathify is gated, so ordinary prose is returned unchanged; the stored
+  // segment text stays raw, so this is purely a non-destructive display transform.
+  const display = useMemo(() => mathify(segment.text), [segment.text])
+
   const requestMath = useCallback(() => {
     setMathPreview(mathify(segment.text))
   }, [segment.text])
@@ -182,7 +187,7 @@ const SegmentRow = memo(function SegmentRow({
               {isMatch ? (
                 <Highlighted text={segment.text} query={query} active={isActiveMatch} />
               ) : (
-                <MathText text={segment.text} />
+                <MathText text={display} />
               )}
               {segment.edited && (
                 <span
@@ -312,7 +317,7 @@ function PrintDocument({ entries }: { entries: TimelineEntry[] }) {
               {formatClock(entry.segment.startedAtEpoch)}
             </span>
             <span className="min-w-0 flex-1 whitespace-pre-wrap">
-              <MathText text={entry.segment.text} />
+              <MathText text={mathify(entry.segment.text)} />
             </span>
           </p>
         ) : (
