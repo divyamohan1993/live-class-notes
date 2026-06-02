@@ -70,6 +70,12 @@ export interface TranscriptionEngineCallbacks {
    * silence timeout fired). The host decides whether to restart — the engine just reports it.
    */
   onEnd: () => void
+  /**
+   * Optional one-time model load/download progress (0..1) with a human label. Only an
+   * on-device engine that must fetch a model (the Whisper engine) emits this; engines with
+   * nothing to download (Web Speech) never call it, so it is optional.
+   */
+  onProgress?: (progress: number, status: string) => void
 }
 
 /**

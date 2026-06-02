@@ -44,7 +44,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { useSession } from '../../store.ts'
 import { WebSpeechEngine } from './engine.ts'
-import type { TranscriptionEngine } from './engine.ts'
+import type { TranscriptionEngine, WebSpeechEngineOptions } from './engine.ts'
+import { WhisperEngine } from './whisper/whisperEngine.ts'
+import { useEnginePref } from './enginePref.ts'
 
 /**
  * PROACTIVE CYCLING — the anti-hang core for multi-hour use.
@@ -123,10 +125,25 @@ const BACKOFF_MAX_MS = 1_500
  */
 const IDLE_COMPLETE_MS = 5 * 60 * 1_000
 
+/**
+ * One-time model load/download progress for the on-device engine. `null` whenever nothing is
+ * loading (Web Speech, or Whisper after the model is cached + ready). The Whisper engine emits
+ * this via onProgress while fetching the ~150MB model on first use; the UI shows a small inline
+ * indicator from it.
+ */
+export interface ModelStatus {
+  /** Load progress in [0, 1]. */
+  progress: number
+  /** Human-readable status label, e.g. "Downloading model". */
+  status: string
+}
+
 export interface UseSpeechRecognition {
   supported: boolean
   listening: boolean
   error: string | null
+  /** Model download/warm-up progress for the on-device engine; null when not loading. */
+  modelStatus: ModelStatus | null
   start: () => void
   stop: () => void
 }
@@ -135,6 +152,11 @@ export function useSpeechRecognition(): UseSpeechRecognition {
   const [listening, setListening] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [supported, setSupported] = useState(false)
+  const [modelStatus, setModelStatus] = useState<ModelStatus | null>(null)
+
+  // Which engine the user has chosen. The whole engine-construction effect depends on this, so
+  // switching tears the old engine down and builds the selected one. Default 'web-speech'.
+  const enginePref = useEnginePref((s) => s.engine)
 
   // All mutable control state lives in refs so the engine's long-lived callbacks (bound once)
   // always read the latest values without stale closures and without re-creating the engine.
@@ -286,6 +308,13 @@ export function useSpeechRecognition(): UseSpeechRecognition {
         scheduleRestart()
         return
       }
+      // The wedge-timeout + grace timers below are a Web-Speech-specific failure mode (Chromium
+      // wedging a freshly-started recognizer so it fires neither onstart nor onend). Whisper has no
+      // such mode AND its onStart only fires after a multi-minute model download on first use, so a
+      // 3s wedge-timeout would reset() the worker mid-download (terminating it) and loop forever. So
+      // we arm these timers ONLY for Web Speech; for Whisper a slow start is normal and the worker's
+      // own getUserMedia / worker-error paths surface failures via onError + onEnd.
+      if (enginePref !== 'web-speech') return
       // (1) START-TIMEOUT — un-wedge. If onStart never fires, the recognizer is wedged (Chromium
       // fired neither onstart nor onend; the classic "shows reconnecting, never reconnects"). On
       // fire: salvage any pending text, force a HARD engine teardown so the abandoned instance can
@@ -405,11 +434,17 @@ export function useSpeechRecognition(): UseSpeechRecognition {
     // Expose the funnel to start() for the reload-resume path (see ensureRunningRef).
     ensureRunningRef.current = ensureRunning
 
-    const engine = new WebSpeechEngine({
+    // Typed as WebSpeechEngineOptions (callbacks + lang); this shape also satisfies
+    // WhisperEngineOptions (which only adds optional model/prompt), so the one literal builds
+    // either engine. The annotation gives the callback params their contextual types back.
+    const engineCallbacks: WebSpeechEngineOptions = {
       lang: useSession.getState().meta.lang,
       onStart: () => {
         runningRef.current = true
         startingRef.current = false
+        // Loaded and live: any model-download indicator is done (covers Web Speech, which never
+        // shows one, and Whisper once the worker reports ready).
+        setModelStatus(null)
         // The start resolved successfully: cancel the wedge-timeout and the grace timer so the
         // grace can never fire a stray 'reconnecting' AFTER we are already live (item 4).
         clearStartTimers()
@@ -529,6 +564,11 @@ export function useSpeechRecognition(): UseSpeechRecognition {
         // The session ended: any per-start timeout/grace for it is now moot.
         clearStartTimers()
         setListening(false)
+        // Any end clears the model-download indicator: a successful load surfaces via onStart, so a
+        // non-null modelStatus reaching here means the load attempt ended without becoming live
+        // (stop mid-download, fatal worker error). Cleared up front so the early-return stop path
+        // below cannot strand a stale progress bar.
+        setModelStatus(null)
         // onEnd is the single chokepoint for EVERY session ending — clean stop, network drop,
         // proactive cycle, stall, error (Web Speech fires onError THEN onEnd, so handling the
         // flush here also covers the error case without risking a double-commit). Salvage the
@@ -551,7 +591,26 @@ export function useSpeechRecognition(): UseSpeechRecognition {
           useSession.getState().setConnection('idle')
         }
       },
-    })
+      // Only the on-device engine emits this (first-use model download); Web Speech never calls it.
+      // Hold it as hook state so the UI can show "Loading model N%"; onStart/onEnd clear it.
+      onProgress: (progress: number, status: string) => {
+        setModelStatus({ progress, status })
+        // Push back the 5-min idle auto-complete while the model is genuinely downloading. The idle
+        // clock is armed on the Record click and otherwise reset only by interim/final speech, but a
+        // slow first-use download (~150MB) can exceed 5 minutes with no speech yet — without this it
+        // would auto-stop an empty session mid-download. Progress ticks frequently, so this keeps the
+        // clock fresh until onStart; normal silence semantics resume once recognition is live.
+        armIdleTimer()
+      },
+    }
+
+    // Construct the SELECTED engine. The effect re-runs (and fully tears down below) whenever the
+    // engine pref changes, so exactly one engine is ever live. Whisper needs the same user gesture
+    // (getUserMedia) as Web Speech; the gesture latch above gates both equally.
+    const engine: TranscriptionEngine =
+      enginePref === 'whisper'
+        ? new WhisperEngine(engineCallbacks)
+        : new WebSpeechEngine(engineCallbacks)
 
     engineRef.current = engine
     setSupported(engine.supported)
@@ -583,6 +642,13 @@ export function useSpeechRecognition(): UseSpeechRecognition {
         if (gestureStartedRef.current && idle) ensureRunning()
         return
       }
+
+      // Jobs B and C below are Web-Speech-only. They exist to pre-empt / recover Chromium's
+      // ~50-60s silent-death cliff. Whisper has no silent-death: it captures continuously and
+      // emits a final only every ~WINDOW_SECONDS, going legitimately quiet during board work, so
+      // cycling it would needlessly reload the model and the 9s silence backstop would tear the
+      // mic down mid-lecture. Whisper relies on job A (warm restart) + the 5-min idle complete.
+      if (enginePref !== 'web-speech') return
 
       // --- B. Proactive cycle while running. ---
       const sessionAge = now - sessionStartRef.current
@@ -625,7 +691,10 @@ export function useSpeechRecognition(): UseSpeechRecognition {
     // Restart on language change while recording so the new lang takes effect immediately.
     const unsubLang = useSession.subscribe((state, prev) => {
       if (state.meta.lang === prev.meta.lang) return
-      if (engineRef.current instanceof WebSpeechEngine) {
+      if (
+        engineRef.current instanceof WebSpeechEngine ||
+        engineRef.current instanceof WhisperEngine
+      ) {
         engineRef.current.setLang(state.meta.lang)
       }
       if (useSession.getState().status === 'recording' && runningRef.current) {
@@ -685,13 +754,19 @@ export function useSpeechRecognition(): UseSpeechRecognition {
       window.removeEventListener('offline', onOffline)
       document.removeEventListener('visibilitychange', onVisibility)
       try {
-        engineRef.current?.stop()
+        // On an engine SWITCH, stop() the Web Speech engine but hard-reset() Whisper so its worker
+        // is terminated (stop() leaves the warm worker alive for a later start, which we don't want
+        // when abandoning the engine entirely). reset() makes no onEnd promise and frees the model.
+        if (engineRef.current instanceof WhisperEngine) engineRef.current.reset()
+        else engineRef.current?.stop()
       } catch {
         // ignore
       }
       engineRef.current = null
+      // Clear any in-flight model-download indicator so a switch never leaves a stale progress bar.
+      setModelStatus(null)
     }
-  }, [])
+  }, [enginePref])
 
   // start()/stop() are thin drivers: they move the STORE lifecycle, and the status
   // subscription above brings the engine up/down. This keeps the user gesture (the click)
@@ -725,5 +800,5 @@ export function useSpeechRecognition(): UseSpeechRecognition {
     state.stopRecording()
   }
 
-  return { supported, listening, error, start, stop }
+  return { supported, listening, error, modelStatus, start, stop }
 }
