@@ -338,7 +338,7 @@ export function exportMarkdown(): void {
   for (const entry of entries) {
     if (entry.kind === 'segment') {
       // Timestamp as a small italic lead-in; math source ($...$) is kept verbatim.
-      lines.push(`*${formatClock(entry.segment.startedAtEpoch)}* — ${mathify(entry.segment.text)}`, '')
+      lines.push(`*${formatClock(entry.segment.startedAtEpoch)}*  ${mathify(entry.segment.text)}`, '')
     } else {
       const img = entry.image
       const alt = imageCaption(img).replace(/[[\]]/g, '')
@@ -349,7 +349,9 @@ export function exportMarkdown(): void {
     }
   }
 
-  const md = lines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n'
+  // Lead with a UTF-8 BOM so editors detect the encoding: math symbols and Hindi /
+  // Indian-language notes are non-ASCII and were otherwise misread (mojibake) by some viewers.
+  const md = '﻿' + lines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n'
   downloadBlob(new Blob([md], { type: 'text/markdown;charset=utf-8' }), `${exportFileBase(title)}.md`)
 }
 
